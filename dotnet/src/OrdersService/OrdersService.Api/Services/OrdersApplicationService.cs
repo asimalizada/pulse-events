@@ -38,7 +38,7 @@ public sealed class OrdersApplicationService(OrdersDbContext dbContext) : IOrder
             EventId = eventId,
             Type = "OrderCreated",
             Payload = JsonSerializer.Serialize(integrationEvent, SerializerOptions),
-            Status = "PENDING",
+            Status = "Pending",
             CreatedAt = occurredAt,
         };
 

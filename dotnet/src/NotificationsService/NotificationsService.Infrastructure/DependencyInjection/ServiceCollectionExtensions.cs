@@ -9,9 +9,10 @@ public static class ServiceCollectionExtensions
 {
     public static IServiceCollection AddNotificationsPersistence(this IServiceCollection services, IConfiguration configuration)
     {
-        var connectionString = configuration.GetConnectionString("NotificationsDatabase")
+        var connectionString = configuration.GetConnectionString("Default")
+            ?? configuration.GetConnectionString("NotificationsDatabase")
             ?? configuration.GetConnectionString("DefaultConnection")
-            ?? throw new InvalidOperationException("Connection string 'NotificationsDatabase' or 'DefaultConnection' is required.");
+            ?? throw new InvalidOperationException("Connection string 'Default', 'NotificationsDatabase', or 'DefaultConnection' is required.");
 
         services.AddDbContext<NotificationsDbContext>(options =>
             options.UseNpgsql(connectionString));

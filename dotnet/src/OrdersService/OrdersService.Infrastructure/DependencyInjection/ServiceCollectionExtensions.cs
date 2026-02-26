@@ -9,9 +9,10 @@ public static class ServiceCollectionExtensions
 {
     public static IServiceCollection AddOrdersPersistence(this IServiceCollection services, IConfiguration configuration)
     {
-        var connectionString = configuration.GetConnectionString("OrdersDatabase")
+        var connectionString = configuration.GetConnectionString("Default")
+            ?? configuration.GetConnectionString("OrdersDatabase")
             ?? configuration.GetConnectionString("DefaultConnection")
-            ?? throw new InvalidOperationException("Connection string 'OrdersDatabase' or 'DefaultConnection' is required.");
+            ?? throw new InvalidOperationException("Connection string 'Default', 'OrdersDatabase', or 'DefaultConnection' is required.");
 
         services.AddDbContext<OrdersDbContext>(options =>
             options.UseNpgsql(connectionString));

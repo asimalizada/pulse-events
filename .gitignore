@@ -1,0 +1,7 @@
+# .NET artifacts (dotnet workspace only)
+/dotnet/**/bin/
+/dotnet/**/obj/
+/dotnet/.vs/
+/dotnet/**/*.user
+/dotnet/**/*.rsuser
+/dotnet/**/*.suo

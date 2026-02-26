@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using OrdersService.Infrastructure.Messaging;
 using OrdersService.Infrastructure.Persistence;
+using Serilog.Context;
 
 namespace OrdersService.Infrastructure.Outbox;
 
@@ -12,6 +13,8 @@ public sealed class OutboxPublisherHostedService(
     IRabbitMqPublisher rabbitMqPublisher,
     ILogger<OutboxPublisherHostedService> logger) : BackgroundService
 {
+    private const int BatchSize = 20;
+    private const int PublishAttempts = 3;
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -48,35 +51,80 @@ public sealed class OutboxPublisherHostedService(
         var dbContext = scope.ServiceProvider.GetRequiredService<OrdersDbContext>();
 
         var pendingMessages = await dbContext.OutboxMessages
-            .Where(x => x.Status == "Pending")
+            .AsNoTracking()
+            .Where(x => x.Status == OutboxStatus.Pending)
             .OrderBy(x => x.CreatedAt)
-            .Take(20)
+            .Take(BatchSize)
             .ToListAsync(cancellationToken);
-
-        if (pendingMessages.Count == 0)
-        {
-            return;
-        }
 
         foreach (var message in pendingMessages)
         {
+            using (LogContext.PushProperty("EventId", message.EventId))
+            {
+                var published = await PublishWithRetryAsync(message, cancellationToken);
+                if (!published)
+                {
+                    logger.LogError(
+                        "Outbox message {OutboxMessageId} remains pending after retries.",
+                        message.Id);
+                    continue;
+                }
+
+                var updatedRows = await dbContext.OutboxMessages
+                    .Where(x => x.Id == message.Id && x.Status == OutboxStatus.Pending)
+                    .ExecuteUpdateAsync(
+                        setters => setters
+                            .SetProperty(x => x.Status, OutboxStatus.Published)
+                            .SetProperty(x => x.PublishedAt, DateTimeOffset.UtcNow),
+                        cancellationToken);
+
+                if (updatedRows != 1)
+                {
+                    logger.LogWarning(
+                        "Outbox status update skipped for message {OutboxMessageId}; it may have been updated concurrently.",
+                        message.Id);
+                }
+            }
+        }
+    }
+
+    private async Task<bool> PublishWithRetryAsync(
+        Persistence.Entities.OutboxMessage message,
+        CancellationToken cancellationToken)
+    {
+        var delay = TimeSpan.FromMilliseconds(200);
+        for (var attempt = 1; attempt <= PublishAttempts; attempt++)
+        {
             try
             {
-                await rabbitMqPublisher.PublishOrderCreatedAsync(message.Payload, cancellationToken);
+                await rabbitMqPublisher.PublishOrderCreatedAsync(message, cancellationToken);
+                logger.LogInformation(
+                    "Outbox message {OutboxMessageId} published on attempt {Attempt}.",
+                    message.Id,
+                    attempt);
+                return true;
+            }
+            catch (Exception ex) when (attempt < PublishAttempts)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Publishing failed for outbox message {OutboxMessageId} on attempt {Attempt}; retrying.",
+                    message.Id,
+                    attempt);
 
-                message.Status = "Published";
-                message.PublishedAt = DateTimeOffset.UtcNow;
-
-                await dbContext.SaveChangesAsync(cancellationToken);
+                await Task.Delay(delay, cancellationToken);
+                delay = TimeSpan.FromMilliseconds(delay.TotalMilliseconds * 2);
             }
             catch (Exception ex)
             {
                 logger.LogError(
                     ex,
-                    "Failed to publish outbox message {OutboxMessageId} (EventId: {EventId}).",
-                    message.Id,
-                    message.EventId);
+                    "Publishing failed permanently for outbox message {OutboxMessageId}.",
+                    message.Id);
+                return false;
             }
         }
+
+        return false;
     }
 }

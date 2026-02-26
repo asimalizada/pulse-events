@@ -7,6 +7,7 @@
     "start": "node dist/main.js",
     "start:dev": "ts-node src/main.ts",
     "start:prod": "node dist/main.js",
+    "test": "ts-node test/order-created.processor.test.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev --name init",
     "postinstall": "prisma generate"

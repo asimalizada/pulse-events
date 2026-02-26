@@ -1,44 +1,77 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { OrderCreatedEvent } from '../common/contracts/order-created.event';
+import { MESSAGING, OUTBOX_STATUS } from '../common/messaging.constants';
 import { CreateOrderDto } from './create-order.dto';
+
+type CreateOrderResult = {
+  orderId: string;
+  eventId: string;
+  correlationId: string;
+};
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
-  async createOrder(createOrderDto: CreateOrderDto) {
+  async createOrder(createOrderDto: CreateOrderDto, correlationId: string): Promise<CreateOrderResult> {
     this.validateCreateOrder(createOrderDto);
 
-    return this.prisma.$transaction(async (tx) => {
+    const eventId = randomUUID();
+    const occurredAt = new Date().toISOString();
+
+    const created = await this.prisma.$transaction(async (tx) => {
       const order = await tx.order.create({
         data: {
-          customerName: createOrderDto.customerName,
+          customerId: createOrderDto.customerId,
           amount: createOrderDto.amount,
         },
       });
 
+      const eventPayload: OrderCreatedEvent = {
+        eventId,
+        type: MESSAGING.eventTypeOrderCreated,
+        data: {
+          orderId: order.id,
+          customerId: order.customerId,
+          amount: order.amount,
+        },
+        occurredAt,
+        correlationId,
+      };
+
       await tx.outboxEvent.create({
         data: {
-          aggregateType: 'ORDER',
-          aggregateId: order.id,
-          eventType: 'OrderCreated',
-          payload: {
-            orderId: order.id,
-            customerName: order.customerName,
-            amount: order.amount,
-            createdAt: order.createdAt.toISOString(),
-          },
-          status: 'PENDING',
+          eventId,
+          type: MESSAGING.eventTypeOrderCreated,
+          payload: eventPayload,
+          status: OUTBOX_STATUS.pending,
         },
       });
 
-      return order;
+      return {
+        orderId: order.id,
+        eventId,
+        correlationId,
+      };
     });
+
+    this.logger.log({
+      message: 'Order and outbox persisted in one transaction.',
+      orderId: created.orderId,
+      eventId: created.eventId,
+      correlationId: created.correlationId,
+    });
+
+    return created;
   }
 
   private validateCreateOrder(createOrderDto: CreateOrderDto): void {
-    if (!createOrderDto || typeof createOrderDto.customerName !== 'string' || createOrderDto.customerName.trim().length === 0) {
-      throw new BadRequestException('customerName is required');
+    if (!createOrderDto || typeof createOrderDto.customerId !== 'string' || createOrderDto.customerId.trim().length === 0) {
+      throw new BadRequestException('customerId is required');
     }
 
     if (typeof createOrderDto.amount !== 'number' || Number.isNaN(createOrderDto.amount)) {

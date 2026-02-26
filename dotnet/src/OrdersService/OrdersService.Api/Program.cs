@@ -1,16 +1,25 @@
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
+using OrdersService.Api.Health;
 using OrdersService.Api.Services;
 using OrdersService.Infrastructure.DependencyInjection;
-using OrdersService.Infrastructure.Messaging;
-using OrdersService.Infrastructure.Outbox;
 using OrdersService.Infrastructure.Persistence;
+using Serilog;
+using Serilog.Formatting.Compact;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddOrdersPersistence(builder.Configuration);
+builder.Host.UseSerilog((context, services, configuration) =>
+{
+    configuration
+        .ReadFrom.Configuration(context.Configuration)
+        .ReadFrom.Services(services)
+        .Enrich.FromLogContext()
+        .WriteTo.Console(new RenderedCompactJsonFormatter());
+});
+
+builder.Services.AddOrdersInfrastructure(builder.Configuration);
 builder.Services.AddScoped<IOrdersApplicationService, OrdersApplicationService>();
-builder.Services.AddSingleton<IRabbitMqPublisher, RabbitMqPublisher>();
-builder.Services.AddHostedService<OutboxPublisherHostedService>();
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
 
@@ -26,5 +35,9 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapControllers();
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    ResponseWriter = HealthResponseWriter.WriteAsync,
+});
 
 app.Run();

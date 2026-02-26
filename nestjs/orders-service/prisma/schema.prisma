@@ -8,8 +8,8 @@ datasource db {
 }
 
 model Order {
-  id           String   @id @default(cuid())
-  customerName String   @map("customer_name")
+  id           String   @id @default(uuid())
+  customerId   String   @map("customer_id")
   amount       Float
   createdAt    DateTime @default(now()) @map("created_at")
 
@@ -17,12 +17,11 @@ model Order {
 }
 
 model OutboxEvent {
-  id            String   @id @default(cuid())
-  aggregateType String   @map("aggregate_type")
-  aggregateId   String   @map("aggregate_id")
-  eventType     String   @map("event_type")
+  id            String    @id @default(uuid())
+  eventId       String    @unique @map("event_id")
+  type          String
   payload       Json
-  status        String   @default("PENDING")
+  status        String    @default("Pending")
   createdAt     DateTime @default(now()) @map("created_at")
   publishedAt   DateTime? @map("published_at")
 

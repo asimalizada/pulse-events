@@ -1,13 +1,16 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Channel, ChannelModel, connect } from 'amqplib';
+import { OrderCreatedEvent } from '../common/contracts/order-created.event';
+import { MESSAGING, OUTBOX_STATUS } from '../common/messaging.constants';
+import { buildRabbitMqUrl } from '../common/rabbitmq';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OutboxPublisher.name);
   private readonly pollIntervalMs = 2000;
-  private readonly queueName = process.env.OUTBOX_QUEUE || 'orders.events';
-  private readonly rabbitmqUrl = process.env.RABBITMQ_URL || 'amqp://rabbitmq:5672';
+  private readonly publishAttempts = 3;
+  private readonly rabbitmqUrl = buildRabbitMqUrl();
 
   private connection: ChannelModel | null = null;
   private channel: Channel | null = null;
@@ -46,6 +49,11 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  async canConnect(): Promise<boolean> {
+    const hasChannel = await this.ensureChannel();
+    return hasChannel && this.channel !== null;
+  }
+
   private async ensureChannel(): Promise<boolean> {
     if (this.connection && this.channel) {
       return true;
@@ -63,7 +71,9 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
       });
 
       const channel = await connection.createChannel();
-      await channel.assertQueue(this.queueName, { durable: true });
+      await channel.assertExchange(MESSAGING.exchange, 'topic', { durable: true });
+      await channel.assertQueue(MESSAGING.queue, { durable: true });
+      await channel.bindQueue(MESSAGING.queue, MESSAGING.exchange, MESSAGING.routingKey);
 
       this.connection = connection;
       this.channel = channel;
@@ -90,43 +100,74 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
       }
 
       const pendingEvents = await this.prisma.outboxEvent.findMany({
-        where: { status: 'PENDING' },
+        where: { status: OUTBOX_STATUS.pending },
         orderBy: { createdAt: 'asc' },
-        take: 100,
+        take: 20,
       });
 
       for (const event of pendingEvents) {
-        try {
-          const message = Buffer.from(
-            JSON.stringify({
-              id: event.id,
-              aggregateType: event.aggregateType,
-              aggregateId: event.aggregateId,
-              eventType: event.eventType,
-              payload: event.payload,
-              createdAt: event.createdAt.toISOString(),
-            }),
-          );
-
-          this.channel.sendToQueue(this.queueName, message, {
-            persistent: true,
-            contentType: 'application/json',
-            messageId: event.id,
-            type: event.eventType,
-          });
-
-          await this.prisma.outboxEvent.updateMany({
-            where: { id: event.id, status: 'PENDING' },
-            data: { status: 'PUBLISHED', publishedAt: new Date() },
-          });
-        } catch (error) {
-          this.logger.error(`Failed to publish outbox event ${event.id}: ${(error as Error).message}`);
+        const published = await this.publishWithRetry(event.id, event.eventId, event.type, event.payload as OrderCreatedEvent);
+        if (!published) {
+          this.logger.error(`Outbox event remained pending after retries: ${event.id}`);
+          continue;
         }
+
+        await this.prisma.outboxEvent.updateMany({
+          where: { id: event.id, status: OUTBOX_STATUS.pending },
+          data: { status: OUTBOX_STATUS.published, publishedAt: new Date() },
+        });
       }
     } catch (error) {
       this.logger.error(`Outbox publish cycle failed: ${(error as Error).message}`);
     } finally {
       this.isProcessing = false;
     }
+  }
+
+  private async publishWithRetry(
+    outboxId: string,
+    eventId: string,
+    eventType: string,
+    payload: OrderCreatedEvent,
+  ): Promise<boolean> {
+    let delayMs = 200;
+
+    for (let attempt = 1; attempt <= this.publishAttempts; attempt++) {
+      try {
+        const hasChannel = await this.ensureChannel();
+        if (!hasChannel || !this.channel) {
+          throw new Error('RabbitMQ channel unavailable');
+        }
+
+        const message = Buffer.from(JSON.stringify(payload));
+        this.channel.publish(MESSAGING.exchange, MESSAGING.routingKey, message, {
+          persistent: true,
+          contentType: 'application/json',
+          messageId: eventId,
+          type: eventType,
+          headers: {
+            [MESSAGING.correlationHeader]: payload.correlationId,
+            [MESSAGING.retryCountHeader]: 0,
+          },
+        });
+
+        return true;
+      } catch (error) {
+        if (attempt >= this.publishAttempts) {
+          this.logger.error(
+            `Publish failed permanently for outbox event ${outboxId} (eventId ${eventId}): ${(error as Error).message}`,
+          );
+          return false;
+        }
+
+        this.logger.warn(
+          `Publish failed for outbox event ${outboxId} on attempt ${attempt}; retrying with backoff.`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        delayMs *= 2;
+      }
+    }
+
+    return false;
   }
 }

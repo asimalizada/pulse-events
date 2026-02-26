@@ -1,14 +1,25 @@
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
+using NotificationsService.Api.Health;
 using NotificationsService.Api.Services;
-using NotificationsService.Infrastructure.Consumers;
 using NotificationsService.Infrastructure.DependencyInjection;
 using NotificationsService.Infrastructure.Persistence;
+using Serilog;
+using Serilog.Formatting.Compact;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddNotificationsPersistence(builder.Configuration);
+builder.Host.UseSerilog((context, services, configuration) =>
+{
+    configuration
+        .ReadFrom.Configuration(context.Configuration)
+        .ReadFrom.Services(services)
+        .Enrich.FromLogContext()
+        .WriteTo.Console(new RenderedCompactJsonFormatter());
+});
+
+builder.Services.AddNotificationsInfrastructure(builder.Configuration);
 builder.Services.AddScoped<INotificationsQueryService, NotificationsQueryService>();
-builder.Services.AddHostedService<OrderCreatedConsumerHostedService>();
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
 
@@ -24,5 +35,9 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapControllers();
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    ResponseWriter = HealthResponseWriter.WriteAsync,
+});
 
 app.Run();

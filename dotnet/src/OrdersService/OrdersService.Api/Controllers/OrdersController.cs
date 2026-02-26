@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using OrdersService.Api.Contracts;
 using OrdersService.Api.Services;
+using OrdersService.Domain;
 
 namespace OrdersService.Api.Controllers;
 
@@ -16,8 +17,16 @@ public sealed class OrdersController(IOrdersApplicationService ordersApplication
             return ValidationProblem(ModelState);
         }
 
-        var result = await ordersApplicationService.CreateAsync(request, cancellationToken);
+        var correlationId = ResolveCorrelationId();
+        var result = await ordersApplicationService.CreateAsync(request, correlationId, cancellationToken);
+        Response.Headers[MessagingConstants.CorrelationHeader] = result.CorrelationId.ToString();
 
-        return Created($"/orders/{result.OrderId}", new CreateOrderResponse(result.OrderId, result.EventId));
+        return Created($"/orders/{result.OrderId}", new CreateOrderResponse(result.OrderId, result.EventId, result.CorrelationId));
+    }
+
+    private Guid ResolveCorrelationId()
+    {
+        var rawCorrelationId = Request.Headers[MessagingConstants.CorrelationHeader].FirstOrDefault();
+        return Guid.TryParse(rawCorrelationId, out var correlationId) ? correlationId : Guid.NewGuid();
     }
 }

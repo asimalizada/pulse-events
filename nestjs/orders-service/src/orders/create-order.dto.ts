@@ -1,4 +1,4 @@
 export class CreateOrderDto {
-  customerName!: string;
+  customerId!: string;
   amount!: number;
 }

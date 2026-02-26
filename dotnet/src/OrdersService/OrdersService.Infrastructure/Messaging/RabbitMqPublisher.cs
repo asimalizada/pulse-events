@@ -1,15 +1,15 @@
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using OrdersService.Domain;
+using OrdersService.Domain.Contracts;
+using OrdersService.Infrastructure.Persistence.Entities;
 using RabbitMQ.Client;
 
 namespace OrdersService.Infrastructure.Messaging;
 
 public sealed class RabbitMqPublisher(ILogger<RabbitMqPublisher> logger) : IRabbitMqPublisher, IAsyncDisposable
 {
-    private const string ExchangeName = "pulse.events";
-    private const string QueueName = "order.created";
-    private const string RoutingKey = "order.created";
-
     private readonly SemaphoreSlim _connectionLock = new(1, 1);
     private readonly ConnectionFactory _connectionFactory = new()
     {
@@ -23,24 +23,47 @@ public sealed class RabbitMqPublisher(ILogger<RabbitMqPublisher> logger) : IRabb
     private IConnection? _connection;
     private IChannel? _channel;
 
-    public async Task PublishOrderCreatedAsync(string payload, CancellationToken cancellationToken)
+    public async Task PublishOrderCreatedAsync(OutboxMessage message, CancellationToken cancellationToken)
     {
         var channel = await EnsureConnectedAsync(cancellationToken);
-        var body = Encoding.UTF8.GetBytes(payload);
+        var integrationEvent = JsonSerializer.Deserialize<OrderCreatedIntegrationEvent>(message.Payload)
+            ?? throw new InvalidOperationException("Outbox payload could not be deserialized.");
+        var body = Encoding.UTF8.GetBytes(message.Payload);
+
         var properties = new BasicProperties
         {
             Persistent = true,
             ContentType = "application/json",
-            Type = "OrderCreated",
+            Type = message.Type,
+            MessageId = message.EventId.ToString(),
+            Headers = new Dictionary<string, object?>
+            {
+                [MessagingConstants.CorrelationHeader] = integrationEvent.CorrelationId.ToString(),
+                [MessagingConstants.RetryCountHeader] = 0,
+            },
         };
 
         await channel.BasicPublishAsync(
-            exchange: ExchangeName,
-            routingKey: RoutingKey,
+            exchange: MessagingConstants.ExchangeName,
+            routingKey: MessagingConstants.RoutingKey,
             mandatory: true,
             basicProperties: properties,
             body: body,
             cancellationToken: cancellationToken);
+    }
+
+    public async Task<bool> CanConnectAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var channel = await EnsureConnectedAsync(cancellationToken);
+            return channel.IsOpen;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "RabbitMQ connectivity check failed.");
+            return false;
+        }
     }
 
     private async Task<IChannel> EnsureConnectedAsync(CancellationToken cancellationToken)
@@ -74,7 +97,7 @@ public sealed class RabbitMqPublisher(ILogger<RabbitMqPublisher> logger) : IRabb
             _channel = await _connection.CreateChannelAsync(cancellationToken: cancellationToken);
 
             await _channel.ExchangeDeclareAsync(
-                exchange: ExchangeName,
+                exchange: MessagingConstants.ExchangeName,
                 type: ExchangeType.Topic,
                 durable: true,
                 autoDelete: false,
@@ -84,7 +107,7 @@ public sealed class RabbitMqPublisher(ILogger<RabbitMqPublisher> logger) : IRabb
                 cancellationToken: cancellationToken);
 
             await _channel.QueueDeclareAsync(
-                queue: QueueName,
+                queue: MessagingConstants.QueueName,
                 durable: true,
                 exclusive: false,
                 autoDelete: false,
@@ -94,9 +117,9 @@ public sealed class RabbitMqPublisher(ILogger<RabbitMqPublisher> logger) : IRabb
                 cancellationToken: cancellationToken);
 
             await _channel.QueueBindAsync(
-                queue: QueueName,
-                exchange: ExchangeName,
-                routingKey: RoutingKey,
+                queue: MessagingConstants.QueueName,
+                exchange: MessagingConstants.ExchangeName,
+                routingKey: MessagingConstants.RoutingKey,
                 arguments: null,
                 noWait: false,
                 cancellationToken: cancellationToken);

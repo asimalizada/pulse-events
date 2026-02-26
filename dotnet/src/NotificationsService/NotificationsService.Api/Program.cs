@@ -1,6 +1,8 @@
+using Microsoft.EntityFrameworkCore;
 using NotificationsService.Api.Services;
 using NotificationsService.Infrastructure.Consumers;
 using NotificationsService.Infrastructure.DependencyInjection;
+using NotificationsService.Infrastructure.Persistence;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -14,6 +16,10 @@ var app = builder.Build();
 
 if (app.Environment.IsDevelopment())
 {
+    using var scope = app.Services.CreateScope();
+    var dbContext = scope.ServiceProvider.GetRequiredService<NotificationsDbContext>();
+    dbContext.Database.Migrate();
+
     app.MapOpenApi();
 }
 

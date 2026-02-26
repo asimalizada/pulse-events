@@ -5,3 +5,12 @@
 /dotnet/**/*.user
 /dotnet/**/*.rsuser
 /dotnet/**/*.suo
+
+# Node/NestJS artifacts
+/nestjs/**/node_modules/
+/nestjs/**/dist/
+/nestjs/**/.env
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

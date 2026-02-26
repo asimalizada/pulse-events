@@ -1,47 +1,43 @@
-# Pulse Events (.NET)
+# Pulse Events - .NET
 
-## Overview
+## Tech Stack
 
-This folder contains two .NET microservices:
+- .NET 10 (ASP.NET Core Web API)
+- EF Core + Npgsql
+- PostgreSQL
+- RabbitMQ.Client
+- Serilog (structured JSON logging)
+- Docker Compose
 
-- `OrdersService` (`http://localhost:6201`)
-- `NotificationsService` (`http://localhost:6202`)
-
-Both services are event-driven over RabbitMQ and use separate PostgreSQL databases:
-
-- `orders_db` on host port `15433`
-- `notifications_db` on host port `15434`
-
-RabbitMQ:
-
-- AMQP: `localhost:5673`
-- Management UI: `http://localhost:15673`
-
-## Architecture (Text Diagram)
+## Architecture (ASCII)
 
 ```text
-Client
-  |
-  | POST /orders
-  v
+POST /orders
+   |
+   v
 OrdersService.Api
-  |-- writes orders row
-  |-- writes outbox_messages row
-  |   (same EF Core transaction)
-  |
-  | OutboxPublisherHostedService (2s polling)
-  v
-Exchange: pulse.events
-Routing Key: order.created
-Queue: order.created
-  |
-  v
-NotificationsService consumer
-  |-- idempotency gate: processed_events(event_id unique)
-  |-- notifications insert
-  v
-GET /notifications?orderId=<guid>
+   |  tx: orders + outbox_messages
+   v
+OutboxPublisherHostedService (poll 2s, retry/backoff)
+   |
+   v
+exchange pulse.events -> routing key order.created -> queue order.created
+   |
+   v
+OrderCreatedConsumerHostedService
+   |  idempotency: processed_events(event_id unique)
+   v
+NotificationsService.Api (query notifications by orderId)
 ```
+
+## Ports
+
+- Orders API: `6201 -> 8080`
+- Notifications API: `6202 -> 8080`
+- RabbitMQ AMQP: `5673 -> 5672`
+- RabbitMQ UI: `15673 -> 15672`
+- Orders DB: `15433 -> 5432`
+- Notifications DB: `15434 -> 5432`
 
 ## Run
 
@@ -51,61 +47,45 @@ From `dotnet/`:
 docker compose up --build
 ```
 
-## Test With curl
-
-### Linux/macOS
+Stop:
 
 ```bash
-ORDER_RESPONSE=$(curl -s -X POST http://localhost:6201/orders \
-  -H "Content-Type: application/json" \
-  -H "x-correlation-id: 00000000-0000-0000-0000-000000000123" \
-  -d '{"customerId":"123","amount":100}')
-echo "$ORDER_RESPONSE"
-
-ORDER_ID=$(echo "$ORDER_RESPONSE" | sed -E 's/.*"orderId":"([^"]+)".*/\1/')
-sleep 4
-curl -s "http://localhost:6202/notifications?orderId=${ORDER_ID}"
+docker compose down
 ```
 
-### Windows (PowerShell)
+## Database Schema Summary
 
-```powershell
-$body = @{ customerId = '123'; amount = 100 } | ConvertTo-Json -Compress
-$order = Invoke-RestMethod -Method Post -Uri 'http://localhost:6201/orders' `
-  -Headers @{ 'x-correlation-id' = '00000000-0000-0000-0000-000000000123' } `
-  -ContentType 'application/json' -Body $body
-$order
+Orders DB:
 
-Start-Sleep -Seconds 4
-Invoke-RestMethod -Method Get -Uri "http://localhost:6202/notifications?orderId=$($order.orderId)"
-```
+- `orders(id, customer_id, amount, created_at)`
+- `outbox_messages(id, event_id, type, payload, status, created_at, published_at)`
+- Index: `outbox_messages(status, created_at)`
+- Unique: `outbox_messages(event_id)`
 
-Health:
+Notifications DB:
 
-```bash
-curl -s http://localhost:6201/health
-curl -s http://localhost:6202/health
-```
+- `notifications(id, order_id, message, created_at)`
+- `processed_events(id, event_id, processed_at)`
+- Unique: `processed_events(event_id)`
 
-## Event Contract
+## Architecture Decisions
 
-```json
-{
-  "eventId": "uuid",
-  "type": "OrderCreated",
-  "data": {
-    "orderId": "uuid",
-    "customerId": "string",
-    "amount": 100
-  },
-  "occurredAt": "ISO-8601",
-  "correlationId": "uuid"
-}
-```
+1. Orders API does not publish directly; it persists intent via outbox in the same transaction as order data.
+2. Outbox worker publishes only committed `Pending` rows and marks `Published` after publish success.
+3. Consumer applies idempotency before side effects to tolerate at-least-once delivery.
+4. Consumer retries are bounded (`x-retry-count`) to avoid infinite poison-message requeue loops.
+5. Correlation IDs are propagated via HTTP header -> event payload/header -> producer/consumer logs.
+6. `/health` checks verify both DB and RabbitMQ dependencies.
 
-## Reliability Notes
+## Troubleshooting
 
-- Outbox pattern: Order + outbox message are committed in one transaction.
-- Publisher worker: polls pending rows every 2s, publishes with retry/backoff, marks `Pending -> Published` only after successful publish.
-- Idempotent consumer: `processed_events(event_id)` unique index prevents duplicates under at-least-once delivery.
-- Poison message handling: failed consumer processing is retried with header `x-retry-count`; after max retries, message is rejected without requeue.
+1. Notifications service exits on startup:
+   Verify RabbitMQ is healthy and reachable; consumer startup retries are enabled.
+2. Health endpoint not healthy:
+   Check connection strings and broker credentials in compose environment.
+3. Event published but no notification:
+   Inspect `processed_events` for duplicate suppression and outbox status in Orders DB.
+4. Port conflicts:
+   Stop the NestJS stack first; both implementations use the same shared host infra ports.
+5. Migration issues:
+   Development startup applies migrations automatically; manual commands are in [`MIGRATIONS.md`](MIGRATIONS.md).
